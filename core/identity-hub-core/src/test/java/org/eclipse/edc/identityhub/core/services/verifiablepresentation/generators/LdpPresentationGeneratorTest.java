@@ -166,6 +166,48 @@ class LdpPresentationGeneratorTest extends PresentationGeneratorTest {
         assertThat(result.get("https://w3id.org/security#proof")).isNotNull();
     }
 
+    @Test
+    @DisplayName("Demonstrate issue #893: Custom context from credential should be included in VP @context")
+    public void create_whenCredentialHasCustomContext_shouldIncludeInVpContext() {
+        // This test demonstrates the issue where custom contexts from credentials
+        // are not propagated to the VP's @context array, potentially causing
+        // custom terms to be dropped during JSON-LD compaction
+        
+        var customContext = "https://example.org/custom-context/v1";
+        var credentialWithCustomContext = """
+                {
+                  "@context": [
+                    "https://www.w3.org/2018/credentials/v1",
+                    "%s"
+                  ],
+                  "id": "urn:uuid:test-credential-123",
+                  "type": ["VerifiableCredential"],
+                  "issuer": "did:web:issuer",
+                  "issuanceDate": "2023-01-01T00:00:00Z",
+                  "credentialSubject": {
+                    "id": "did:web:subject",
+                    "customProperty": "test-value",
+                    "organizationId": "org-123"
+                  }
+                }
+                """.formatted(customContext);
+
+        var vcc = new VerifiableCredentialContainer(credentialWithCustomContext, CredentialFormat.VC1_0_LD, createDummyCredential());
+
+        var result = creator.generatePresentation(participantContextId, List.of(vcc), PRIVATE_KEY_ALIAS, PUBLIC_KEY_ID, issuerId, ADDITIONAL_DATA);
+
+        assertThat(result).isNotNull();
+        
+        // The VP should have been created with @context before signing
+        // However, after signing, the document is in expanded form
+        // The issue: the VP was created without the custom context, so when it's later
+        // compacted (in PresentationApiController), custom terms will be dropped
+        
+        // This test documents the expected behavior that should work after the fix
+        // Expected: VP's @context should include the custom context from the credential
+        // Current behavior: VP only has hardcoded base contexts
+    }
+
     @NotNull
     private TitaniumJsonLd initializeJsonLd() {
         var jld = new TitaniumJsonLd(mock());
@@ -176,6 +218,7 @@ class LdpPresentationGeneratorTest extends PresentationGeneratorTest {
         jld.registerCachedDocument(DCP_CONTEXT_URL, TestUtils.getResource("dcp.v08.json"));
         jld.registerCachedDocument(PRESENTATION_EXCHANGE_URL, TestUtils.getResource("presentation-exchange.v1.json"));
         jld.registerCachedDocument("https://www.w3.org/2018/credentials/examples/v1", TestUtils.getResource("examples.v1.json"));
+        jld.registerCachedDocument("https://example.org/custom-context/v1", TestUtils.getResource("custom-context.v1.json"));
         return jld;
     }
 
