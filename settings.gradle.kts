@@ -80,6 +80,7 @@ include(":protocols:dcp:dcp-identityhub:dcp-identityhub-core")
 
 // Identity APIs
 include(":extensions:api:identity-api")
+include(":extensions:api:identity-api:admin-seed")
 include(":extensions:api:identity-api:identity-api-configuration")
 include(":extensions:api:identity-api:identity-api-authentication-oauth2")
 include(":extensions:api:identity-api:identity-api-authorization-oauth2")

@@ -1,0 +1,274 @@
+# ---------------------------------------------------------------------------
+# Eclipse EDC IdentityHub — local DCP wallet + issuer stack
+# ---------------------------------------------------------------------------
+#
+# This repo splits the wallet and issuer into two separate runtimes:
+#   • identityhub  (launcher:identityhub  → identityhub-bom)    — DCP wallet
+#   • issuer-service (launcher:issuer-service → issuerservice-bom) — DCP issuer
+#
+# Both share a single Postgres instance (pg-identityhub).
+# ---------------------------------------------------------------------------
+
+services:
+
+  # -------------------------------------------------------------------------
+  # IdentityHub — DCP wallet runtime
+  #   DCP Presentation API, Credential Storage API, STS, Identity Admin API
+  # -------------------------------------------------------------------------
+  identityhub:
+    image: identityhub:local
+    build:
+      context: ./launcher/identityhub
+      dockerfile: Dockerfile
+    container_name: identityhub
+    depends_on:
+      pg-identityhub:
+        condition: service_healthy
+    ports:
+      - "8080:8080"       # default API / health
+      - "15151:15151"     # Identity Admin API
+      - "13131:13131"     # DCP Credentials / Presentation API
+      - "10100:10100"     # DID web endpoint
+      - "9292:9292"       # Secure Token Service (STS)
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        export EDC_VAULT_HASHICORP_TOKEN=$$(cat /vault-token/token)
+        exec java $$ENV_JVM_ARGS -jar identity-hub.jar
+    volumes:
+      - ./config/identityhub.properties:/app/config/identityhub.properties:ro
+      - vault-token:/vault-token:ro
+    environment:
+      # ----- Filesystem config loader --------------------------------------
+      EDC_FS_CONFIG: /app/config/identityhub.properties
+
+      # ----- Default (health / readiness) API ------------------------------
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+
+      # ----- Identity Admin API --------------------------------------------
+      WEB_HTTP_IDENTITY_PORT: "15151"
+      WEB_HTTP_IDENTITY_PATH: "/api/identity"
+
+      # ----- DCP Credentials / Presentation API ----------------------------
+      WEB_HTTP_CREDENTIALS_PORT: "13131"
+      WEB_HTTP_CREDENTIALS_PATH: "/api/credentials"
+
+      # ----- DID web endpoint ---------------------------------------------
+      WEB_HTTP_DID_PORT: "10100"
+      WEB_HTTP_DID_PATH: "/"
+
+      # ----- Secure Token Service ------------------------------------------
+      WEB_HTTP_STS_PORT: "9292"
+      WEB_HTTP_STS_PATH: "/api/sts"
+
+      # ----- SQL datasource (shared Postgres) ------------------------------
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://pg-identityhub:5432/identityhub"
+      EDC_DATASOURCE_DEFAULT_USER: "ih"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "ihpass"
+
+      # ----- IAM / STS keys (override in config or vault) ------------------
+      EDC_IAM_STS_PUBLICKEY_ID: "identityhub-key"
+      EDC_IAM_STS_PRIVATEKEY_ALIAS: "identityhub-alias"
+
+      # ----- DID resolution ------------------------------------------------
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+
+      # ----- Access-token replay protection --------------------------------
+      EDC_IAM_ACCESSTOKEN_JTI_VALIDATION: "true"
+
+      # ----- Credential watchdog -------------------------------------------
+      EDC_IAM_CREDENTIAL_STATUS_CHECK_PERIOD: "60"
+      EDC_IAM_CREDENTIAL_REVOCATION_MIMETYPE: "*/*"
+
+      # ----- Vault (HashiCorp — shared with EDC Connectors) ----------------
+      EDC_VAULT_HASHICORP_URL: "http://vault:8200"
+      # EDC_VAULT_HASHICORP_TOKEN is set at runtime from the vault-token volume
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+      EDC_VAULT_HASHICORP_ALLOW__FALLBACK: "true"
+      EDC_VAULT_HASHICORP_HEALTH_CHECK_ENABLED: "true"
+
+      # ----- Misc ----------------------------------------------------------
+      EDC_ENCRYPTION_STRICT: "false"
+      EDC_API_AUTH_KEY: "${EDC_API_AUTH_KEY:-c3VwZXItc2VjcmV0LWFwaS1rZXk=}"
+    networks:
+      - edc-network
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Issuer Service — DCP issuer runtime
+  #   DCP Issuance API, Issuer Admin API, StatusList endpoint
+  # -------------------------------------------------------------------------
+  issuer-service:
+    image: issuer-service:local
+    build:
+      context: ./launcher/issuer-service
+      dockerfile: Dockerfile
+    container_name: issuer-service
+    depends_on:
+      pg-identityhub:
+        condition: service_healthy
+    ports:
+      - "8081:8080"       # default API / health
+      - "15152:15152"     # Issuer Admin API
+      - "15153:15153"     # Identity API (participant-context-api)
+      - "13132:13132"     # DCP Issuance API
+      - "10101:10101"     # DID web endpoint
+      - "9999:9999"       # StatusList credential endpoint
+      - "9293:9293"       # STS (issuer)
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        export EDC_VAULT_HASHICORP_TOKEN=$$(cat /vault-token/token)
+        exec java $$ENV_JVM_ARGS -jar issuer-service.jar
+    volumes:
+      - ./config/issuer-service.properties:/app/config/issuer-service.properties:ro
+      - vault-token:/vault-token:ro
+    environment:
+      # ----- Filesystem config loader --------------------------------------
+      EDC_FS_CONFIG: /app/config/issuer-service.properties
+
+      # ----- Default (health / readiness) API ------------------------------
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+
+      # ----- Issuer Admin API ----------------------------------------------
+      WEB_HTTP_ISSUERADMIN_PORT: "15152"
+      WEB_HTTP_ISSUERADMIN_PATH: "/api/issuer"
+
+      # ----- DCP Issuance API ----------------------------------------------
+      WEB_HTTP_ISSUANCE_PORT: "13132"
+      WEB_HTTP_ISSUANCE_PATH: "/api/issuance"
+
+      # ----- StatusList credential endpoint --------------------------------
+      WEB_HTTP_STATUSLIST_PORT: "9999"
+      WEB_HTTP_STATUSLIST_PATH: "/statuslist"
+
+      # ----- Identity API (issuer also exposes participant-context-api) -----
+      WEB_HTTP_IDENTITY_PORT: "15153"
+      WEB_HTTP_IDENTITY_PATH: "/api/identity"
+
+      # ----- DID web endpoint ----------------------------------------------
+      WEB_HTTP_DID_PORT: "10101"
+      WEB_HTTP_DID_PATH: "/"
+
+      # ----- STS (issuer) --------------------------------------------------
+      WEB_HTTP_STS_PORT: "9293"
+      WEB_HTTP_STS_PATH: "/api/sts"
+
+      # ----- SQL datasource (separate Postgres DB for issuer) ---------------
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://pg-identityhub:5432/issuerservice"
+      EDC_DATASOURCE_DEFAULT_USER: "ih"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "ihpass"
+
+      # ----- IAM / STS keys ------------------------------------------------
+      EDC_IAM_STS_PUBLICKEY_ID: "issuer-key"
+      EDC_IAM_STS_PRIVATEKEY_ALIAS: "issuer-alias"
+
+      # ----- DID resolution ------------------------------------------------
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+
+      # ----- Access-token replay protection --------------------------------
+      EDC_IAM_ACCESSTOKEN_JTI_VALIDATION: "true"
+
+      # ----- StatusList callback (public URL the issuer advertises) ---------
+      # Set this to the externally-reachable URL of the statuslist endpoint.
+      EDC_STATUSLIST_CALLBACK_ADDRESS: "http://issuer-service:9999/statuslist"
+
+      # ----- Vault (HashiCorp — shared with EDC Connectors) ----------------
+      EDC_VAULT_HASHICORP_URL: "http://vault:8200"
+      # EDC_VAULT_HASHICORP_TOKEN is set at runtime from the vault-token volume
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+      EDC_VAULT_HASHICORP_ALLOW__FALLBACK: "true"
+      EDC_VAULT_HASHICORP_HEALTH_CHECK_ENABLED: "true"
+
+      # ----- Misc ----------------------------------------------------------
+      EDC_ENCRYPTION_STRICT: "false"
+      EDC_API_AUTH_KEY: "${EDC_API_AUTH_KEY:-c3VwZXItc2VjcmV0LWFwaS1rZXk=}"
+    networks:
+      - edc-network
+
+  # -------------------------------------------------------------------------
+  # PostgreSQL — shared SQL store for credentials, status lists, wallet data
+  # -------------------------------------------------------------------------
+  pg-identityhub:
+    image: postgres:17
+    container_name: pg-identityhub
+    environment:
+      POSTGRES_USER: ih
+      POSTGRES_PASSWORD: ihpass
+      POSTGRES_MULTIPLE_DATABASES: identityhub,issuerservice
+    ports:
+      - "5435:5432"
+    volumes:
+      - pg-identityhub-data:/var/lib/postgresql/data
+      - ./config/pg-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ih -d identityhub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - edc-network
+
+volumes:
+  pg-identityhub-data:
+  vault-token:
+    external: true
+    name: edc-vault-token   # created by EDC Connector docker-compose.edc.yml
+
+networks:
+  edc-network:
+    external: true
+    name: edc-shared
+    # Create this network before starting either stack:
+    #   docker network create edc-shared
+
+# ---------------------------------------------------------------------------
+# BUILD INSTRUCTIONS
+# ---------------------------------------------------------------------------
+#
+# Prerequisites:
+#   - Docker network: docker network create edc-shared
+#   - EDC Connector stack running (provides HashiCorp Vault on edc-shared)
+#
+# 1. Build the IdentityHub (wallet) fat-jar and Docker image:
+#
+#      ./gradlew :launcher:identityhub:shadowJar
+#      docker build -t identityhub:local launcher/identityhub
+#
+# 2. Build the Issuer Service fat-jar and Docker image:
+#
+#      ./gradlew :launcher:issuer-service:shadowJar
+#      docker build -t issuer-service:local launcher/issuer-service
+#
+# 3. Start the stack:
+#
+#      docker compose -f docker-compose.identityhub.yml up -d
+#
+# 4. Health checks:
+#
+#      curl http://localhost:8080/api/check/health    # identityhub
+#      curl http://localhost:8081/api/check/health    # issuer-service
+#
+# VAULT ARCHITECTURE:
+#   Both IdentityHub and EDC Connectors share a single HashiCorp Vault
+#   instance running in the Connector Docker stack.  The Vault root token
+#   is randomly generated on each `docker compose up` by the
+#   vault-token-gen service and shared via the `edc-vault-token` Docker
+#   volume (declared external here, created by the Connector stack).
+#   The Connector's vault-init service seeds ALL secrets (Connector +
+#   IH + Issuer) on first boot.  STS client secrets created by the
+#   Identity Admin API are written directly into the shared Vault, so
+#   Connectors can read them without any external sync.
+#   See: https://github.com/eclipse-edc/Connector/discussions/4200
+#
+# NOTE: The identityhub-bom and issuerservice-bom launchers do NOT include
+#       SQL persistence by default. For Postgres support you must either:
+#         a) Create custom launchers that also depend on the SQL feature BOMs
+#            (:dist:bom:identityhub-feature-sql-bom and
+#             :dist:bom:issuerservice-feature-sql-bom), OR
+#         b) Add the SQL jars to the classpath at runtime.
+# ---------------------------------------------------------------------------

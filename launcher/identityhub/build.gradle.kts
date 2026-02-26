@@ -20,6 +20,9 @@ plugins {
 
 dependencies {
     runtimeOnly(project(":dist:bom:identityhub-bom"))
+    runtimeOnly(project(":dist:bom:identityhub-feature-sql-bom"))
+    runtimeOnly(project(":extensions:api:identity-api:admin-seed"))
+    runtimeOnly(libs.edc.vault.hashicorp)
 }
 
 application {

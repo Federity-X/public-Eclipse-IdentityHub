@@ -21,6 +21,11 @@ plugins {
 
 dependencies {
     runtimeOnly(project(":dist:bom:issuerservice-bom"))
+    runtimeOnly(project(":dist:bom:issuerservice-feature-sql-bom"))
+    runtimeOnly(project(":extensions:api:identity-api:admin-seed"))
+    runtimeOnly(project(":extensions:api:identity-api:did-api"))
+    runtimeOnly(project(":extensions:api:identity-api:identity-api-configuration"))
+    runtimeOnly(libs.edc.vault.hashicorp)
 }
 
 application {
