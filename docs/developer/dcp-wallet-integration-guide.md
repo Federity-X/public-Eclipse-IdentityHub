@@ -373,7 +373,7 @@ curl -X POST http://localhost:15151/api/identity/v1alpha/participants \
       {
         "id": "#credential-service",
         "type": "CredentialService",
-        "serviceEndpoint": "http://identityhub:13131/api/credentials"
+        "serviceEndpoint": "http://identityhub:13131/api/credentials/v1/participants/cHJvdmlkZXI"
       }
     ],
     "key": {
@@ -419,7 +419,7 @@ curl -X POST http://localhost:15151/api/identity/v1alpha/participants \
       {
         "id": "#credential-service",
         "type": "CredentialService",
-        "serviceEndpoint": "http://identityhub:13131/api/credentials"
+        "serviceEndpoint": "http://identityhub:13131/api/credentials/v1/participants/Y29uc3VtZXI"
       }
     ],
     "key": {
@@ -436,7 +436,7 @@ curl -X POST http://localhost:15151/api/identity/v1alpha/participants \
   }'
 ```
 
-> **Important**: The `serviceEndpoints` array with a `CredentialService` entry is **required for DCP**. Without it, the verifier cannot discover where to request Verifiable Presentations. The `serviceEndpoint` URL must be reachable from other Docker containers (use the container hostname `identityhub`, not `localhost`). The `bootstrap-dcp.sh` script handles this automatically.
+> **Important**: The `serviceEndpoints` array with a `CredentialService` entry is **required for DCP**. Without it, the verifier cannot discover where to request Verifiable Presentations. The `serviceEndpoint` URL must include the per-participant path: `/api/credentials/v1/participants/{base64url-pid}`, where `{base64url-pid}` is the Base64-URL-encoded participant context ID (e.g., `cHJvdmlkZXI` = base64url of `"provider"`). The URL must be reachable from other Docker containers (use the container hostname `identityhub`, not `localhost`). The `bootstrap-dcp.sh` script constructs these URLs automatically.
 
 ### Publish DIDs
 
