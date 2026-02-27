@@ -95,7 +95,18 @@ Both runtimes use PostgreSQL for persistence and share a Docker network (`edc-sh
 
 ### 1. Modified files (required patches on top of `main`)
 
-The following files were added or modified to enable a production-like Postgres deployment:
+The following files were added or modified to enable a production-like deployment with Postgres and HashiCorp Vault:
+
+<details>
+<summary><strong>gradle/libs.versions.toml</strong> — add vault-hashicorp catalog entry</summary>
+
+Add to the `[libraries]` section:
+
+```toml
+edc-vault-hashicorp = { module = "org.eclipse.edc:vault-hashicorp", version.ref = "edc" }
+```
+
+</details>
 
 <details>
 <summary><strong>settings.gradle.kts</strong> — register admin-seed module</summary>
@@ -109,26 +120,30 @@ include(":extensions:api:identity-api:admin-seed")
 </details>
 
 <details>
-<summary><strong>launcher/identityhub/build.gradle.kts</strong> — add SQL + admin-seed</summary>
+<summary><strong>launcher/identityhub/build.gradle.kts</strong> — add SQL, admin-seed, and vault</summary>
 
 ```kotlin
 dependencies {
     runtimeOnly(project(":dist:bom:identityhub-bom"))
     runtimeOnly(project(":dist:bom:identityhub-feature-sql-bom"))
     runtimeOnly(project(":extensions:api:identity-api:admin-seed"))
+    runtimeOnly(libs.edc.vault.hashicorp)
 }
 ```
 
 </details>
 
 <details>
-<summary><strong>launcher/issuer-service/build.gradle.kts</strong> — add SQL + admin-seed</summary>
+<summary><strong>launcher/issuer-service/build.gradle.kts</strong> — add SQL, admin-seed, DID/identity APIs, and vault</summary>
 
 ```kotlin
 dependencies {
     runtimeOnly(project(":dist:bom:issuerservice-bom"))
     runtimeOnly(project(":dist:bom:issuerservice-feature-sql-bom"))
     runtimeOnly(project(":extensions:api:identity-api:admin-seed"))
+    runtimeOnly(project(":extensions:api:identity-api:did-api"))
+    runtimeOnly(project(":extensions:api:identity-api:identity-api-configuration"))
+    runtimeOnly(libs.edc.vault.hashicorp)
 }
 ```
 
@@ -171,9 +186,18 @@ docker build -t issuer-service:local  launcher/issuer-service
 config/
 ├── identityhub.properties          # IdentityHub runtime config
 ├── issuer-service.properties       # Issuer Service runtime config
-└── pg-init/
-    └── create-databases.sh         # Creates both Postgres databases
+├── credentials.env                 # Saved API keys (written by bootstrap)
+├── pg-init/
+│   └── create-databases.sh         # Creates both Postgres databases
+└── vault/
+    └── secrets.properties          # Legacy FsVault reference (not used at runtime)
+scripts/
+├── bootstrap-dcp.sh                # Creates participants, publishes DIDs, sets up issuer
+├── finish-bootstrap.sh             # Recovery: creates holders + attestations if bootstrap step 8 failed
+├── store-membership-vc.py          # Issues and stores MembershipCredential JWTs
+└── add-credential-service.py       # Adds CredentialService to DID documents
 docker-compose.identityhub.yml      # Full stack definition
+test-api.sh                         # 38-endpoint API validation script
 ```
 
 ### Start the stack
@@ -345,8 +369,15 @@ curl -X POST http://localhost:15151/api/identity/v1alpha/participants \
     "did": "'"$PROVIDER_DID"'",
     "active": true,
     "roles": ["participant"],
+    "serviceEndpoints": [
+      {
+        "id": "#credential-service",
+        "type": "CredentialService",
+        "serviceEndpoint": "http://identityhub:13131/api/credentials"
+      }
+    ],
     "key": {
-      "keyId": "provider-key",
+      "keyId": "'"$PROVIDER_DID"'#provider-key",
       "privateKeyAlias": "provider-alias",
       "resourceId": "provider-resource",
       "keyGeneratorParams": {
@@ -384,8 +415,15 @@ curl -X POST http://localhost:15151/api/identity/v1alpha/participants \
     "did": "'"$CONSUMER_DID"'",
     "active": true,
     "roles": ["participant"],
+    "serviceEndpoints": [
+      {
+        "id": "#credential-service",
+        "type": "CredentialService",
+        "serviceEndpoint": "http://identityhub:13131/api/credentials"
+      }
+    ],
     "key": {
-      "keyId": "consumer-key",
+      "keyId": "'"$CONSUMER_DID"'#consumer-key",
       "privateKeyAlias": "consumer-alias",
       "resourceId": "consumer-resource",
       "keyGeneratorParams": {
@@ -397,6 +435,8 @@ curl -X POST http://localhost:15151/api/identity/v1alpha/participants \
     }
   }'
 ```
+
+> **Important**: The `serviceEndpoints` array with a `CredentialService` entry is **required for DCP**. Without it, the verifier cannot discover where to request Verifiable Presentations. The `serviceEndpoint` URL must be reachable from other Docker containers (use the container hostname `identityhub`, not `localhost`). The `bootstrap-dcp.sh` script handles this automatically.
 
 ### Publish DIDs
 
@@ -516,13 +556,13 @@ curl -X POST http://localhost:9292/api/sts/token \
 
 ```bash
 IS_BASE=http://localhost:15152/api/issuer/v1alpha
-ADMIN_B64=$(echo -n "super-admin" | base64 | tr '+/' '-_' | tr -d '=')
+ADMIN_B64=$(echo -n "issuer-admin" | base64 | tr '+/' '-_' | tr -d '=')
 
 curl -X POST "$IS_BASE/participants/$ADMIN_B64/holders" \
   -H "x-api-key: $IS_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "holderId": "provider-holder",
+    "holderId": "provider",
     "did": "did:web:localhost%3A10100:provider",
     "name": "Provider Organization"
   }'
@@ -535,12 +575,11 @@ curl -X POST "$IS_BASE/participants/$ADMIN_B64/attestations" \
   -H "x-api-key: $IS_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "membership-att",
+    "id": "membership-attestation",
     "attestationType": "database",
     "configuration": {
       "dataSourceName": "default",
-      "tableName": "membership_data",
-      "idColumn": "holder_id"
+      "tableName": "membership_attestations"
     }
   }'
 ```
@@ -556,7 +595,7 @@ curl -X POST "$IS_BASE/participants/$ADMIN_B64/credentialdefinitions" \
     "credentialType": "MembershipCredential",
     "format": "VC1_0_JWT",
     "jsonSchema": "{\"type\":\"object\"}",
-    "attestations": ["membership-att"]
+    "attestations": ["membership-attestation"]
   }'
 ```
 
@@ -649,7 +688,7 @@ edc.iam.sts.token.expiration=5
 # --- DCP Scope ---
 edc.iam.dcp.scopes.membership.id=membership-scope
 edc.iam.dcp.scopes.membership.type=DEFAULT
-edc.iam.dcp.scopes.membership.value=org.eclipse.dspace.dcp.vc.type:MembershipCredential:read
+edc.iam.dcp.scopes.membership.value=org.eclipse.edc.vc.type:MembershipCredential:read
 
 # --- Trusted issuer ---
 edc.iam.trusted-issuer.issuer.id=did:web:issuer-service%3A10101:issuer
@@ -750,7 +789,7 @@ curl -X POST "http://localhost:15151/api/identity/v1alpha/participants/${PARTICI
       "credential": {
         "id": "urn:uuid:12345678-abcd-1234-abcd-123456789abc",
         "type": ["VerifiableCredential", "MembershipCredential"],
-        "issuer": { "id": "did:web:localhost%3A10101:super-admin" },
+        "issuer": { "id": "did:web:issuer-service%3A10101:issuer" },
         "issuanceDate": "2025-06-01T00:00:00Z",
         "credentialSubject": {
           "id": "did:web:localhost%3A10100:provider",
@@ -771,7 +810,7 @@ curl -X POST "http://localhost:15151/api/identity/v1alpha/participants/${PARTICI
   -H "Content-Type: application/json" \
   -H "x-api-key: $IH_KEY" \
   -d '{
-    "issuerDid": "did:web:localhost%3A10101:super-admin",
+    "issuerDid": "did:web:issuer-service%3A10101:issuer",
     "holderPid": "my-request-001",
     "credentials": [
       { "format": "VC1_0_JWT", "type": "MembershipCredential", "id": "mc-1" }
@@ -915,7 +954,7 @@ cd ../public-Eclipse-IdentityHub
 docker compose -f docker-compose.identityhub.yml up -d --build
 sleep 15
 
-# 4. Bootstrap DCP integration (creates participants, syncs secrets)
+# 4. Bootstrap DCP integration (creates participants, publishes DIDs)
 ./scripts/bootstrap-dcp.sh
 
 # 5. Issue and store Membership VCs (required for DCP auth)
